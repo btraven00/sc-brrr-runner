@@ -51,6 +51,6 @@ scoring machine's git credentials (`gh auth setup-git`), commits its git identit
   handles within the budget is itself a result.
 - A GitHub App instead of the machine account; a check run next to the comment.
 - Serve the run's detailed `runner.log` (redacted) next to the summary log.
-- Results keyed by input content, not the size label (sc-brrr `docs/infrastructure.typ`, caveats).
+- Results keyed by input content, not the size label (sc-brrr `docs/design.typ`, caveats).
 - The fidelity gate (kNN purity, edge Jaccard, ARI vs the reference): until then the scoreboard
   ranks speed without checking correctness.
