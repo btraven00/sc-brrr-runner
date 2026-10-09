@@ -63,6 +63,9 @@ type config struct {
 // token is the GitHub token: git pushes with it; it never reaches score.py or the submissions.
 var token string
 
+// gitName, gitEmail: who the runner's commits are by (e.g. the bot account); empty: git's own config.
+var gitName, gitEmail string
+
 func main() {
 	home, _ := os.UserHomeDir()
 	var c config
@@ -79,6 +82,8 @@ func main() {
 	flag.StringVar(&c.state, "state", filepath.Join(home, ".local/state/sc-brrr-runner"), "kept logs and the lock")
 	flag.BoolVar(&c.push, "push", false, "push both repos after each entry (without it, everything stays local)")
 	flag.BoolVar(&c.comment, "comment", false, "comment on the entry's PR (live-log link, then the outcome), as the token's owner")
+	flag.StringVar(&gitName, "git-name", "", "author and committer of the runner's commits (empty: git's config)")
+	flag.StringVar(&gitEmail, "git-email", "", "their email, e.g. <id>+<bot>@users.noreply.github.com")
 	flag.DurationVar(&watch, "watch", 0, "keep polling at this interval (0: drain the queue once and exit)")
 	flag.Parse()
 	if err := applyConfig(*cfgPath); err != nil {
@@ -430,6 +435,12 @@ func git(dir string, args ...string) (string, error) {
 		pre = append(pre, "-c", "credential.helper=", "-c",
 			`credential.helper=!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f`)
 		cmd.Env = append(cmd.Env, "GH_TOKEN="+token)
+	}
+	if gitName != "" {
+		cmd.Env = append(cmd.Env, "GIT_AUTHOR_NAME="+gitName, "GIT_COMMITTER_NAME="+gitName)
+	}
+	if gitEmail != "" {
+		cmd.Env = append(cmd.Env, "GIT_AUTHOR_EMAIL="+gitEmail, "GIT_COMMITTER_EMAIL="+gitEmail)
 	}
 	cmd.Args = append(cmd.Args, append(pre, args...)...)
 	out, err := cmd.CombinedOutput()

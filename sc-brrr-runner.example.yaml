@@ -10,6 +10,8 @@ results: ../sc-brrr-results
 size: 10k
 push: true
 comment: false   # on once the token is a bot's (comments appear as the token's owner)
+git-name: omnibot-runner   # the runner's commits: by the bot, not a person
+git-email: 340148882+omnibot-runner@users.noreply.github.com
 watch: 5m
 
 # The live page: listen locally, expose through a reverse proxy with TLS (e.g. caddy);
