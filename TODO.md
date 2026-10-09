@@ -62,6 +62,8 @@ entry `exact-ref-0.1.5` scored there end to end. What the setup took, for the ne
 - Contributors run the runner locally (`try`), with the dataset fetched and verified by hash.
 - GPU smoke runs on labelled PRs, pulled by the runner, with a commit status on the PR.
 - Re-score everything in `submissions/` when the plan hash changes.
+- Baselines on freshly resolved environments, daily, to see library-update trends (not urgent):
+  https://github.com/btraven00/sc-brrr/issues/4
 - Score up the ladder (10k, 50k, 100k, 150k, …) and stop at the first OOM: the largest size an entry
   handles within the budget is itself a result.
 - A GitHub App instead of the machine account; a check run next to the comment.
