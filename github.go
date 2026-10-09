@@ -99,7 +99,7 @@ func (c config) report(pr int, commentID int64, stem, logName string, o Outcome)
 		where += " (not pushed yet)"
 	}
 	body := fmt.Sprintf("%s **`%s`: %s**\n\n```text\n%s\n```\n\n%s\n\n%s", icon, stem, o.Outcome,
-		strings.ReplaceAll(o.Reason, "```", "'''"), where, c.logLink(logName, "Log"))
+		strings.ReplaceAll(c.redact.Replace(o.Reason), "```", "'''"), where, c.logLink(logName, "Log"))
 	if err := c.gh.api("PATCH", fmt.Sprintf("/repos/%s/%s/issues/comments/%d", c.gh.owner, c.gh.repo, commentID),
 		map[string]string{"body": body}, nil); err != nil {
 		log.Printf("warning: updating the comment on PR #%d: %v", pr, err)

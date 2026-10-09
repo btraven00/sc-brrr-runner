@@ -82,7 +82,9 @@ makes are served (`[\w.-]+\.log`, inside the logs dir).
 
 **On a public machine.** Listen on localhost and put a reverse proxy with TLS in front (caddy,
 nginx); set `public-url` to it. The page is read-only and unauthenticated by design: logs are of
-public submissions, but they do contain the scoring host's paths. Run the runner as its own user,
+public submissions. Everything published (served and committed logs, failure records, PR comments)
+has the host's paths rewritten: the checkouts to `<repo>` / `<results>`, the state dir to `<state>`,
+the home dir to `~`. Run the runner as its own user,
 with rootless podman, under systemd (`Restart=on-failure`: it exits on any error of its own).
 
 ## Roadmap

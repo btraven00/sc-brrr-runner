@@ -20,6 +20,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -55,6 +56,7 @@ type config struct {
 	publicURL                  string // where -listen is reachable from outside, for the PR comment
 	push                       bool
 	gh                         *github // nil without a token
+	redact                     *strings.Replacer
 }
 
 // token is the GitHub token: git pushes with it; it never reaches score.py or the submissions.
@@ -86,6 +88,9 @@ func main() {
 	for _, p := range []*string{&c.repo, &c.results, &c.state} {
 		*p, _ = filepath.Abs(*p)
 	}
+	// what gets published (served and committed logs, failure records, PR comments) names no host
+	// paths; most specific first, as the replacer tries its pairs in order
+	c.redact = strings.NewReplacer(c.repo, "<repo>", c.results, "<results>", c.state, "<state>", home, "~")
 	if err := os.MkdirAll(filepath.Join(c.state, "logs"), 0o755); err != nil {
 		log.Fatal(err)
 	}
@@ -278,12 +283,14 @@ func score(c config, e queued) error {
 	live.start(stem, logName)
 	pr, commentID := c.announce(e, stem, logName)
 
-	tail := &tailWriter{max: 80}
+	tail := &tailWriter{max: 80} // raw: the OUTCOME line's log path is read back
+	published := &redactWriter{w: lf, r: c.redact}
 	cmd := exec.Command("./score.py", "--no-commit", "--size", c.size, "--results", c.results, e.rel)
 	cmd.Dir, cmd.Env = c.repo, scrubbedEnv()
-	cmd.Stdout = io.MultiWriter(lf, os.Stdout, tail)
-	cmd.Stderr = io.MultiWriter(lf, os.Stderr, tail)
+	cmd.Stdout = io.MultiWriter(published, os.Stdout, tail)
+	cmd.Stderr = io.MultiWriter(published, os.Stderr, tail)
 	runErr := cmd.Run()
+	published.Flush()
 	o, ok := tail.outcome()
 	live.finish(stem, o, ok)
 	if !ok {
@@ -316,8 +323,16 @@ func score(c config, e queued) error {
 			record.LogTail = lastLines(o.Log, 80)
 		}
 		record.Log = "" // a path on the scoring host; the record is published
-		b, _ := json.MarshalIndent(record, "", " ")
-		if err := move(c.repo, e.rel, "failed", b); err != nil {
+		record.Reason = c.redact.Replace(record.Reason)
+		for i, l := range record.LogTail {
+			record.LogTail[i] = c.redact.Replace(l)
+		}
+		var b bytes.Buffer
+		enc := json.NewEncoder(&b)
+		enc.SetEscapeHTML(false) // "<repo>", not "\u003crepo\u003e": the record is read by people
+		enc.SetIndent("", " ")
+		enc.Encode(record)
+		if err := move(c.repo, e.rel, "failed", bytes.TrimSpace(b.Bytes())); err != nil {
 			return err
 		}
 		if _, err := git(c.repo, "commit", "-q", "-m", fmt.Sprintf("failed: %s: %s", stem, o.Outcome)); err != nil {
@@ -423,6 +438,30 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, b, 0o644)
+}
+
+// redactWriter writes whole lines through the replacer, so a path split across writes still matches.
+type redactWriter struct {
+	w   io.Writer
+	r   *strings.Replacer
+	buf []byte
+}
+
+func (d *redactWriter) Write(p []byte) (int, error) {
+	d.buf = append(d.buf, p...)
+	if i := bytes.LastIndexByte(d.buf, '\n'); i >= 0 {
+		if _, err := io.WriteString(d.w, d.r.Replace(string(d.buf[:i+1]))); err != nil {
+			return 0, err
+		}
+		d.buf = append(d.buf[:0], d.buf[i+1:]...)
+	}
+	return len(p), nil
+}
+
+// Flush writes a last line that had no newline.
+func (d *redactWriter) Flush() {
+	io.WriteString(d.w, d.r.Replace(string(d.buf)))
+	d.buf = d.buf[:0]
 }
 
 // tailWriter keeps the last max lines written to it, for the OUTCOME line and failure records.

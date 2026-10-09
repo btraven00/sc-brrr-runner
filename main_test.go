@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -50,5 +51,17 @@ push: true
 	}
 	if cfg, err := readConfig(t.TempDir() + "/missing.yaml"); cfg != nil || err != nil {
 		t.Errorf("a missing config is no config: %v %v", cfg, err)
+	}
+}
+
+// Published logs name no host paths, even when a path arrives split across two writes.
+func TestRedact(t *testing.T) {
+	var out strings.Builder
+	d := &redactWriter{w: &out, r: strings.NewReplacer("/srv/sc-brrr", "<repo>", "/home/u", "~")}
+	d.Write([]byte("-> /srv/sc-b"))
+	d.Write([]byte("rrr/runs/x/results\nlog: /home/u/.local/state/l"))
+	d.Flush()
+	if got, want := out.String(), "-> <repo>/runs/x/results\nlog: ~/.local/state/l"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
