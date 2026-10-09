@@ -49,6 +49,7 @@ another file) under its own name; flags on the command line win. `github-token` 
 | `results` | `../sc-brrr-results` | results checkout; cloned from `results-url` if missing |
 | `size` | `10k` | input size to score on |
 | `push` | off | push both repos after each entry; without it everything stays local |
+| `comment` | off | comment on the entry's PR as the token's owner: on only with a bot's token |
 | `watch` | `0` | poll at this interval; `0` drains once and exits |
 | `listen` | off | serve the live page and the kept logs here |
 | `public-url` | none | the live page's public address, linked from PR comments |
@@ -66,7 +67,7 @@ read/write on both repos and Pull requests + Issues read/write on `sc-brrr`. Com
 token's owner: use a machine user (e.g. `sc-brrr-bot`, a collaborator on both repos) so they
 don't come from a person; a GitHub App (`sc-brrr[bot]`) is the step after.
 
-**PR comments.** When scoring starts, the runner finds the PR that added the entry (GitHub's
+**PR comments** (`comment: true`; off by default, since they appear as the token's owner). When scoring starts, the runner finds the PR that added the entry (GitHub's
 commits → pulls lookup on the commit that added the file) and comments with a link to the live
 log; when it ends, it edits that comment with the outcome and a link to the result (results repo)
 or to the failure record (`failed/…outcome.json`). No token, no PR found, or an API error: a warning

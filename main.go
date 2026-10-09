@@ -54,8 +54,8 @@ type config struct {
 	repo, results, size, state string
 	repoURL, resultsURL        string
 	publicURL                  string // where -listen is reachable from outside, for the PR comment
-	push                       bool
-	gh                         *github // nil without a token
+	push, comment              bool
+	gh                         *github // nil without a token, or with comments off
 	redact                     *strings.Replacer
 }
 
@@ -76,6 +76,7 @@ func main() {
 	flag.StringVar(&c.size, "size", "10k", "input size to score on")
 	flag.StringVar(&c.state, "state", filepath.Join(home, ".local/state/sc-brrr-runner"), "kept logs and the lock")
 	flag.BoolVar(&c.push, "push", false, "push both repos after each entry (without it, everything stays local)")
+	flag.BoolVar(&c.comment, "comment", false, "comment on the entry's PR (live-log link, then the outcome), as the token's owner")
 	flag.DurationVar(&watch, "watch", 0, "keep polling at this interval (0: drain the queue once and exit)")
 	flag.Parse()
 	if err := applyConfig(*cfgPath); err != nil {
@@ -84,7 +85,11 @@ func main() {
 	if token == "" {
 		token = os.Getenv("GH_TOKEN")
 	}
-	c.gh = newGitHub(token, c.repoURL)
+	if c.comment {
+		if c.gh = newGitHub(token, c.repoURL); c.gh == nil {
+			log.Fatal("-comment needs github-token (config) or $GH_TOKEN, and a github.com -repo-url")
+		}
+	}
 	for _, p := range []*string{&c.repo, &c.results, &c.state} {
 		*p, _ = filepath.Abs(*p)
 	}

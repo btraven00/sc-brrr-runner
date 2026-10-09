@@ -9,6 +9,7 @@ repo: ../sc-brrr
 results: ../sc-brrr-results
 size: 10k
 push: true
+comment: false   # on once the token is a bot's (comments appear as the token's owner)
 watch: 5m
 
 # The live page: listen locally, expose through a reverse proxy with TLS (e.g. caddy);
