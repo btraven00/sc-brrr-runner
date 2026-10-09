@@ -1,0 +1,17 @@
+# Copy to sc-brrr-runner.yaml (git-ignored) and chmod 600: it holds a token.
+# Keys are the flag names (sc-brrr-runner -h); flags given on the command line win.
+
+# Fine-grained token: Contents read/write on sc-brrr and sc-brrr-results (push),
+# Pull requests read/write and Issues read/write on sc-brrr (the PR comment). Nothing else.
+github-token: "github_pat_..."
+
+repo: ../sc-brrr
+results: ../sc-brrr-results
+size: 10k
+push: true
+watch: 5m
+
+# The live page: listen locally, expose through a reverse proxy with TLS (e.g. caddy);
+# public-url is that proxy's address, linked from the PR comments.
+listen: 127.0.0.1:8080
+public-url: https://runner.example.org

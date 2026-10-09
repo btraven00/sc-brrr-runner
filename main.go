@@ -4,19 +4,18 @@
 // reviewed submission) is scored by the challenge repo's own score.py (podman runner, main's
 // code), oldest first. Then:
 //
-//   - scored (jobs ok or failed): the result is committed to the results checkout, the scoreboard
-//     rebuilt and committed, and the entry moved to submissions/ (the log of scored entries);
+//   - scored (jobs ok or failed): the result and its log (score.log) are committed to the results
+//     checkout, the scoreboard rebuilt and committed, and the entry moved to submissions/;
 //   - not scored (rejected, or setup failed before any job ran): the entry is moved to failed/ with
 //     <name>-<ver>.outcome.json (the reason and the end of the log). To retry, git mv it back.
 //
 // score.py's contract: the last "OUTCOME {json}" line of its output and its exit code. No OUTCOME
 // line means the scorer itself broke: the entry stays in incoming/ and the runner stops.
 //
-// Missing checkouts are cloned from -repo-url / -results-url. Git authenticates with $GH_TOKEN when it
-// is set, else with whatever git is configured with (e.g. `gh auth setup-git`). -listen serves the
-// live log of the running entry and the recent outcomes (localhost by default: no auth).
-//
-//	sc-brrr-runner [-repo ../sc-brrr] [-results ../sc-brrr-results] [-size 10k] [-push] [-watch 5m] [-listen 127.0.0.1:8080]
+// Configuration: flags, or the same keys in sc-brrr-runner.yaml (git-ignored; flags win), plus
+// github-token, which is never a flag. With a token, git pushes with it and the runner comments on
+// the entry's PR with a link to the live log, then edits the comment with the outcome. Missing
+// checkouts are cloned. -listen serves the live page and every kept log.
 package main
 
 import (
@@ -25,17 +24,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"html"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -56,23 +52,37 @@ func (o Outcome) scored() bool { return o.Outcome == "ok" || o.Outcome == "jobs_
 type config struct {
 	repo, results, size, state string
 	repoURL, resultsURL        string
+	publicURL                  string // where -listen is reachable from outside, for the PR comment
 	push                       bool
+	gh                         *github // nil without a token
 }
+
+// token is the GitHub token: git pushes with it; it never reaches score.py or the submissions.
+var token string
 
 func main() {
 	home, _ := os.UserHomeDir()
 	var c config
 	var watch time.Duration
+	cfgPath := flag.String("config", "sc-brrr-runner.yaml", "config file: flag names as keys, plus github-token (missing: flags only)")
 	flag.StringVar(&c.repo, "repo", "../sc-brrr", "checkout of the challenge repo (score.py, incoming/)")
 	flag.StringVar(&c.results, "results", "../sc-brrr-results", "checkout of the results repo")
-	flag.StringVar(&c.repoURL, "repo-url", "https://github.com/btraven00/sc-brrr", "cloned into -repo if it is missing")
-	flag.StringVar(&c.resultsURL, "results-url", "https://github.com/btraven00/sc-brrr-results", "cloned into -results if it is missing")
-	listen := flag.String("listen", "", "serve the live log and recent outcomes here (e.g. 127.0.0.1:8080)")
+	flag.StringVar(&c.repoURL, "repo-url", "https://github.com/btraven00/sc-brrr", "cloned into -repo if missing; its PRs get the comments")
+	flag.StringVar(&c.resultsURL, "results-url", "https://github.com/btraven00/sc-brrr-results", "cloned into -results if missing")
+	listen := flag.String("listen", "", "serve the live page and the kept logs here (e.g. 127.0.0.1:8080)")
+	flag.StringVar(&c.publicURL, "public-url", "", "the live page's public address, linked from PR comments (e.g. https://runner.example.org)")
 	flag.StringVar(&c.size, "size", "10k", "input size to score on")
-	flag.StringVar(&c.state, "state", filepath.Join(home, ".local/state/sc-brrr-runner"), "logs and the lock")
+	flag.StringVar(&c.state, "state", filepath.Join(home, ".local/state/sc-brrr-runner"), "kept logs and the lock")
 	flag.BoolVar(&c.push, "push", false, "push both repos after each entry (without it, everything stays local)")
 	flag.DurationVar(&watch, "watch", 0, "keep polling at this interval (0: drain the queue once and exit)")
 	flag.Parse()
+	if err := applyConfig(*cfgPath); err != nil {
+		log.Fatal(err)
+	}
+	if token == "" {
+		token = os.Getenv("GH_TOKEN")
+	}
+	c.gh = newGitHub(token, c.repoURL)
 	for _, p := range []*string{&c.repo, &c.results, &c.state} {
 		*p, _ = filepath.Abs(*p)
 	}
@@ -93,7 +103,7 @@ func main() {
 		}
 	}
 	if *listen != "" {
-		go serve(*listen)
+		go serve(*listen, filepath.Join(c.state, "logs"))
 	}
 
 	for {
@@ -105,6 +115,72 @@ func main() {
 		}
 		time.Sleep(watch)
 	}
+}
+
+// applyConfig sets every flag the command line left alone from the config file, and the token.
+func applyConfig(path string) error {
+	cfg, err := readConfig(path)
+	if err != nil || cfg == nil {
+		return err
+	}
+	onCLI := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { onCLI[f.Name] = true })
+	for k, v := range cfg {
+		switch {
+		case k == "github-token":
+			token = v
+		case k == "config" || flag.Lookup(k) == nil:
+			return fmt.Errorf("%s: unknown key %q (keys are the flag names, plus github-token)", path, k)
+		case !onCLI[k]:
+			if err := flag.Set(k, v); err != nil {
+				return fmt.Errorf("%s: %s: %w", path, k, err)
+			}
+		}
+	}
+	return nil
+}
+
+// readConfig reads a flat YAML file of "key: value" lines (comments, quoted values). Missing: nil.
+// ponytail: flat keys only; a YAML library once the config needs nesting
+func readConfig(path string) (map[string]string, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	if st, err := os.Stat(path); err == nil && st.Mode().Perm()&0o077 != 0 {
+		log.Printf("warning: %s is readable by other users and may hold a token: chmod 600 %s", path, path)
+	}
+	cfg := map[string]string{}
+	for i, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		k, v, ok := strings.Cut(line, ":")
+		if !ok {
+			return nil, fmt.Errorf("%s:%d: want key: value", path, i+1)
+		}
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		switch {
+		case strings.HasPrefix(v, `"`):
+			if v, err = strconv.Unquote(v); err != nil {
+				return nil, fmt.Errorf("%s:%d: bad double-quoted value", path, i+1)
+			}
+		case strings.HasPrefix(v, "'"):
+			if len(v) < 2 || !strings.HasSuffix(v, "'") {
+				return nil, fmt.Errorf("%s:%d: bad single-quoted value", path, i+1)
+			}
+			v = v[1 : len(v)-1]
+		default:
+			if j := strings.Index(v, " #"); j >= 0 {
+				v = strings.TrimSpace(v[:j])
+			}
+		}
+		cfg[k] = v
+	}
+	return cfg, nil
 }
 
 // lock takes an exclusive, non-blocking flock: one runner per host.
@@ -131,9 +207,9 @@ func drain(c config) error {
 		return err
 	}
 	log.Printf("%d entr(ies) in incoming/", len(queue))
-	for _, entry := range queue {
-		if err := score(c, entry); err != nil {
-			return fmt.Errorf("%s: %w", entry, err)
+	for _, e := range queue {
+		if err := score(c, e); err != nil {
+			return fmt.Errorf("%s: %w", e.rel, err)
 		}
 	}
 	return nil
@@ -153,75 +229,78 @@ func syncRepo(dir string) error {
 	return err
 }
 
+// queued is an entry in incoming/ and the commit that added it (which leads to its PR).
+type queued struct {
+	rel, sha string
+	added    int64
+}
+
 // pending lists incoming/<account>/<name>-<ver>.yaml, oldest first by the commit that added it.
-func pending(repo string) ([]string, error) {
+func pending(repo string) ([]queued, error) {
 	paths, err := filepath.Glob(filepath.Join(repo, "incoming", "*", "*.yaml"))
 	if err != nil {
 		return nil, err
 	}
-	type item struct {
-		rel   string
-		added int64
-	}
-	var items []item
+	var q []queued
 	for _, p := range paths {
-		if strings.HasSuffix(p, ".env.yml") || strings.HasSuffix(p, ".outcome.json") {
-			continue
-		}
 		rel, _ := filepath.Rel(repo, p)
-		out, err := git(repo, "log", "--diff-filter=A", "--format=%ct", "--", rel)
+		out, err := git(repo, "log", "--diff-filter=A", "--format=%H %ct", "--", rel)
 		if err != nil {
 			return nil, err
 		}
-		lines := strings.Fields(out)
-		if len(lines) == 0 {
+		lines := strings.Split(out, "\n")
+		f := strings.Fields(lines[len(lines)-1]) // the first add
+		if len(f) != 2 {
 			continue // not committed yet: not queued
 		}
-		t, _ := strconv.ParseInt(lines[len(lines)-1], 10, 64)
-		items = append(items, item{rel, t})
+		t, _ := strconv.ParseInt(f[1], 10, 64)
+		q = append(q, queued{rel, f[0], t})
 	}
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].added != items[j].added {
-			return items[i].added < items[j].added
+	sort.Slice(q, func(i, j int) bool {
+		if q[i].added != q[j].added {
+			return q[i].added < q[j].added
 		}
-		return items[i].rel < items[j].rel
+		return q[i].rel < q[j].rel
 	})
-	queue := make([]string, len(items))
-	for i, it := range items {
-		queue[i] = it.rel
-	}
-	return queue, nil
+	return q, nil
 }
 
-func score(c config, entry string) error {
-	stem := strings.TrimSuffix(strings.TrimPrefix(entry, "incoming/"), ".yaml") // <account>/<name>-<ver>
-	logPath := filepath.Join(c.state, "logs", time.Now().Format("20060102T150405")+"-"+strings.ReplaceAll(stem, "/", "_")+".log")
+func score(c config, e queued) error {
+	stem := strings.TrimSuffix(strings.TrimPrefix(e.rel, "incoming/"), ".yaml") // <account>/<name>-<ver>
+	logName := time.Now().Format("20060102T150405") + "-" + strings.ReplaceAll(stem, "/", "_") + ".log"
+	logPath := filepath.Join(c.state, "logs", logName)
 	lf, err := os.Create(logPath)
 	if err != nil {
 		return err
 	}
 	defer lf.Close()
-	log.Printf("scoring %s (log %s)", entry, logPath)
-	live.start(stem, logPath)
+	log.Printf("scoring %s (log %s)", e.rel, logPath)
+	live.start(stem, logName)
+	pr, commentID := c.announce(e, stem, logName)
 
 	tail := &tailWriter{max: 80}
-	cmd := exec.Command("./score.py", "--no-commit", "--size", c.size, "--results", c.results, entry)
-	cmd.Dir = c.repo
+	cmd := exec.Command("./score.py", "--no-commit", "--size", c.size, "--results", c.results, e.rel)
+	cmd.Dir, cmd.Env = c.repo, scrubbedEnv()
 	cmd.Stdout = io.MultiWriter(lf, os.Stdout, tail)
 	cmd.Stderr = io.MultiWriter(lf, os.Stderr, tail)
 	runErr := cmd.Run()
 	o, ok := tail.outcome()
 	live.finish(stem, o, ok)
 	if !ok {
+		c.report(pr, commentID, stem, logName, Outcome{Outcome: "scorer error", Reason: "the scorer broke; the entry stays queued"})
 		return fmt.Errorf("score.py gave no OUTCOME line (%v); entry left in incoming/, see %s", runErr, logPath)
 	}
-	log.Printf("%s: %s: %s", entry, o.Outcome, o.Reason)
+	log.Printf("%s: %s: %s", e.rel, o.Outcome, o.Reason)
 
 	if o.scored() {
+		lf.Sync()
+		if err := copyFile(logPath, filepath.Join(c.results, o.Result, "score.log")); err != nil {
+			return err
+		}
 		if err := commitResults(c, o); err != nil {
 			return err
 		}
-		if err := move(c.repo, entry, "submissions", nil); err != nil {
+		if err := move(c.repo, e.rel, "submissions", nil); err != nil {
 			return err
 		}
 		if _, err := git(c.repo, "commit", "-q", "-m", fmt.Sprintf("scored: %s: %s (results: %s)", stem, o.Outcome, o.Result)); err != nil {
@@ -238,7 +317,7 @@ func score(c config, entry string) error {
 		}
 		record.Log = "" // a path on the scoring host; the record is published
 		b, _ := json.MarshalIndent(record, "", " ")
-		if err := move(c.repo, entry, "failed", b); err != nil {
+		if err := move(c.repo, e.rel, "failed", b); err != nil {
 			return err
 		}
 		if _, err := git(c.repo, "commit", "-q", "-m", fmt.Sprintf("failed: %s: %s", stem, o.Outcome)); err != nil {
@@ -255,6 +334,7 @@ func score(c config, entry string) error {
 			return err
 		}
 	}
+	c.report(pr, commentID, stem, logName, o) // after the push, so its links resolve
 	return nil
 }
 
@@ -267,7 +347,7 @@ func commitResults(c config, o Outcome) error {
 		return err
 	}
 	cmd := exec.Command("./scoreboard.py", c.results)
-	cmd.Dir, cmd.Stdout, cmd.Stderr = c.repo, os.Stdout, os.Stderr
+	cmd.Dir, cmd.Env, cmd.Stdout, cmd.Stderr = c.repo, scrubbedEnv(), os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("scoreboard: %w", err)
 	}
@@ -308,17 +388,41 @@ func move(repo, entry, to string, outcome []byte) error {
 	return err
 }
 
+// scrubbedEnv is the environment for score.py and scoreboard.py: without the token, which would
+// otherwise reach the setup step that builds a submission's env with network on.
+func scrubbedEnv() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GH_TOKEN=") && !strings.HasPrefix(kv, "GITHUB_TOKEN=") {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
 func git(dir string, args ...string) (string, error) {
 	pre := []string{"-C", dir}
-	if os.Getenv("GH_TOKEN") != "" { // a token for pushing; never on the command line or in a URL
+	cmd := exec.Command("git")
+	cmd.Env = scrubbedEnv()
+	if token != "" { // through a credential helper reading the env: never on the command line or in a URL
 		pre = append(pre, "-c", "credential.helper=", "-c",
 			`credential.helper=!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f`)
+		cmd.Env = append(cmd.Env, "GH_TOKEN="+token)
 	}
-	out, err := exec.Command("git", append(pre, args...)...).CombinedOutput()
+	cmd.Args = append(cmd.Args, append(pre, args...)...)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, out)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func copyFile(src, dst string) error {
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, b, 0o644)
 }
 
 // tailWriter keeps the last max lines written to it, for the OUTCOME line and failure records.
@@ -365,87 +469,4 @@ func lastLines(path string, n int) []string {
 		t.Write([]byte(sc.Text() + "\n"))
 	}
 	return t.lines
-}
-
-// live is what -listen shows: the running entry's log as it grows, and the recent outcomes.
-var live = &status{}
-
-type status struct {
-	mu      sync.Mutex
-	entry   string // running now, "" when idle
-	logPath string
-	recent  []string // newest first
-}
-
-func (s *status) start(entry, logPath string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.entry, s.logPath = entry, logPath
-}
-
-func (s *status) finish(entry string, o Outcome, ok bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	line := fmt.Sprintf("%s  %s  %s", time.Now().Format(time.DateTime), entry, o.Outcome+" ")
-	if !ok {
-		line += "scorer error (no OUTCOME line)"
-	}
-	s.recent = append([]string{line}, s.recent...)[:min(len(s.recent)+1, 50)]
-	s.entry = ""
-}
-
-func (s *status) get() (string, string, []string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.entry, s.logPath, append([]string(nil), s.recent...)
-}
-
-func serve(addr string) {
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		entry, _, recent := live.get()
-		now := "idle"
-		if entry != "" {
-			now = "scoring " + html.EscapeString(entry) + ` · <a href="/log">live log</a>`
-		}
-		fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><title>sc-brrr runner</title>
-<body style="background:#fbf8ef;color:#23211c;font:13px/1.5 ui-monospace,monospace;padding:16px">
-<h1 style="font-size:16px">sc-brrr runner</h1><p>%s</p><h2 style="font-size:13px">recent</h2><pre>%s</pre>`,
-			now, html.EscapeString(strings.Join(recent, "\n")))
-	})
-	// /log streams the running entry's log: what is there, then whatever is appended, until the entry finishes
-	http.HandleFunc("/log", func(w http.ResponseWriter, r *http.Request) {
-		entry, path, _ := live.get()
-		if entry == "" {
-			http.Error(w, "idle: nothing is running", http.StatusNotFound)
-			return
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer f.Close()
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		flusher, _ := w.(http.Flusher)
-		for {
-			if _, err := io.Copy(w, f); err != nil {
-				return
-			}
-			if flusher != nil {
-				flusher.Flush()
-			}
-			if e, _, _ := live.get(); e != entry {
-				io.Copy(w, f) // the last lines
-				return
-			}
-			select {
-			case <-r.Context().Done():
-				return
-			case <-time.After(500 * time.Millisecond):
-			}
-		}
-	})
-	log.Printf("live log on http://%s/", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
 }

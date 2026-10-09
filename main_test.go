@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 // The OUTCOME line is the whole contract with score.py: the last one wins, split writes reassemble,
 // and output without one is an error of the scorer.
@@ -23,5 +26,29 @@ func TestOutcome(t *testing.T) {
 	w.Write([]byte("OUTCOME not json\n"))
 	if _, ok := w.outcome(); ok {
 		t.Fatal("a malformed OUTCOME line must not parse")
+	}
+}
+
+// The config file is flat YAML: comments, quoted values, and values that contain colons (URLs).
+func TestReadConfig(t *testing.T) {
+	f := t.TempDir() + "/c.yaml"
+	os.WriteFile(f, []byte(`# runner config
+github-token: "ghp_abc#def"   
+public-url: https://runner.example.org:8443  # trailing comment
+size: '50k'
+push: true
+`), 0o600)
+	cfg, err := readConfig(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"github-token": "ghp_abc#def", "public-url": "https://runner.example.org:8443", "size": "50k", "push": "true"}
+	for k, v := range want {
+		if cfg[k] != v {
+			t.Errorf("%s = %q, want %q", k, cfg[k], v)
+		}
+	}
+	if cfg, err := readConfig(t.TempDir() + "/missing.yaml"); cfg != nil || err != nil {
+		t.Errorf("a missing config is no config: %v %v", cfg, err)
 	}
 }
