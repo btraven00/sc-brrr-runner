@@ -51,6 +51,8 @@ another file) under its own name; flags on the command line win. `github-token` 
 | `push` | off | push both repos after each entry; without it everything stays local |
 | `comment` | off | comment on the entry's PR as the token's owner: on only with a bot's token |
 | `watch` | `0` | poll at this interval; `0` drains once and exits |
+| `baselines` | none | the plan's baselines to score on a schedule, e.g. `rsc,scanpy` (`score.py --baseline`) |
+| `baseline-every` | `0` (never) | how often, e.g. `8h`; between queue entries, never alongside one; the last pass is remembered in `state` |
 | `listen` | off | serve the live page and the kept logs here |
 | `public-url` | none | the live page's public address, linked from PR comments |
 | `git-name`, `git-email` | git's config | author and committer of the runner's commits: the bot, e.g. `omnibot-runner` and its noreply address |

@@ -13,6 +13,8 @@ comment: false   # on once the token is a bot's (comments appear as the token's 
 git-name: omnibot-runner   # the runner's commits: by the bot, not a person
 git-email: 340148882+omnibot-runner@users.noreply.github.com
 watch: 5m
+baselines: rsc,scanpy   # the plan's baselines, scored on a schedule (results under baselines/ in the results repo)
+baseline-every: 8h
 
 # The live page: listen locally, expose through a reverse proxy with TLS (e.g. caddy);
 # public-url is that proxy's address, linked from the PR comments.

@@ -54,7 +54,9 @@ type config struct {
 	repo, results, size, state string
 	dataCache                  string // the host's input cache (HF cache layout), filled and mounted by runner.py
 	repoURL, resultsURL        string
-	publicURL                  string // where -listen is reachable from outside, for the PR comment
+	publicURL                  string        // where -listen is reachable from outside, for the PR comment
+	baselines                  string        // the plan's baselines to score on a schedule, e.g. "rsc,scanpy"
+	baselineEvery              time.Duration // how often; 0: never
 	push, comment              bool
 	gh                         *github // nil without a token, or with comments off
 	redact                     *strings.Replacer
@@ -84,6 +86,8 @@ func main() {
 	flag.BoolVar(&c.comment, "comment", false, "comment on the entry's PR (live-log link, then the outcome), as the token's owner")
 	flag.StringVar(&gitName, "git-name", "", "author and committer of the runner's commits (empty: git's config)")
 	flag.StringVar(&gitEmail, "git-email", "", "their email, e.g. <id>+<bot>@users.noreply.github.com")
+	flag.StringVar(&c.baselines, "baselines", "", "the plan's baselines to score on a schedule, comma-separated (rsc, scanpy)")
+	flag.DurationVar(&c.baselineEvery, "baseline-every", 0, "score the baselines this often, between queue entries (0: never)")
 	flag.DurationVar(&watch, "watch", 0, "keep polling at this interval (0: drain the queue once and exit)")
 	flag.Parse()
 	if err := applyConfig(*cfgPath); err != nil {
@@ -127,6 +131,9 @@ func main() {
 		if err := drain(c); err != nil {
 			log.Fatal(err) // ponytail: stop on any scorer/infra error; a supervisor (systemd) restarts
 		}
+		if err := baselinesIfDue(c); err != nil {
+			log.Fatal(err)
+		}
 		if watch == 0 {
 			return
 		}
@@ -166,7 +173,7 @@ func readConfig(path string) (map[string]string, error) {
 	} else if err != nil {
 		return nil, err
 	}
-	if st, err := os.Stat(path); err == nil && st.Mode().Perm()&0o077 != 0 {
+	if st, err := os.Stat(path); err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o077 != 0 {
 		log.Printf("warning: %s is readable by other users and may hold a token: chmod 600 %s", path, path)
 	}
 	cfg := map[string]string{}
@@ -230,6 +237,78 @@ func drain(c config) error {
 		}
 	}
 	return nil
+}
+
+// baselinesIfDue scores the configured baselines when the last pass is older than baseline-every.
+// The time of the last pass is kept in the state dir, so a restart doesn't repeat it. A baseline that
+// isn't scored (setup failed) is logged and retried at the next pass; it never moves anything.
+func baselinesIfDue(c config) error {
+	if c.baselines == "" || c.baselineEvery == 0 {
+		return nil
+	}
+	stamp := filepath.Join(c.state, "baselines-last")
+	if b, err := os.ReadFile(stamp); err == nil {
+		if last, err := time.Parse(time.RFC3339, strings.TrimSpace(string(b))); err == nil && time.Since(last) < c.baselineEvery {
+			return nil
+		}
+	}
+	for _, dir := range []string{c.repo, c.results} {
+		if err := syncRepo(dir); err != nil {
+			return err
+		}
+	}
+	for _, id := range strings.Split(c.baselines, ",") {
+		id = strings.TrimSpace(id)
+		stem := "baselines/" + id
+		logName := time.Now().Format("20060102T150405") + "-baselines_" + id + ".log"
+		log.Printf("baseline %s (log %s)", id, filepath.Join(c.state, "logs", logName))
+		o, ok, logPath, err := c.runScore(stem, logName, "--baseline", id)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("baseline %s: score.py gave no OUTCOME line; see %s", id, logPath)
+		}
+		log.Printf("baseline %s: %s: %s", id, o.Outcome, o.Reason)
+		if !o.scored() {
+			continue
+		}
+		if err := copyFile(logPath, filepath.Join(c.results, o.Result, "score.log")); err != nil {
+			return err
+		}
+		if err := commitResults(c, o); err != nil {
+			return err
+		}
+		if c.push {
+			if _, err := git(c.results, "push", "-q"); err != nil {
+				return err
+			}
+		}
+	}
+	return os.WriteFile(stamp, []byte(time.Now().Format(time.RFC3339)+"\n"), 0o644)
+}
+
+// runScore runs score.py with args, its output to the kept log (redacted) and the live page, and
+// returns its OUTCOME.
+func (c config) runScore(stem, logName string, args ...string) (o Outcome, ok bool, logPath string, err error) {
+	logPath = filepath.Join(c.state, "logs", logName)
+	lf, err := os.Create(logPath)
+	if err != nil {
+		return o, false, logPath, err
+	}
+	defer lf.Close()
+	live.start(stem, logName)
+	tail := &tailWriter{max: 80}
+	published := &redactWriter{w: lf, r: c.redact}
+	cmd := exec.Command("./score.py", append([]string{"--no-commit", "--size", c.size, "--results", c.results}, args...)...)
+	cmd.Dir, cmd.Env = c.repo, append(scrubbedEnv(), "SC_BRRR_DATA_CACHE="+c.dataCache)
+	cmd.Stdout = io.MultiWriter(published, os.Stdout, tail)
+	cmd.Stderr = io.MultiWriter(published, os.Stderr, tail)
+	cmd.Run()
+	published.Flush()
+	o, ok = tail.outcome()
+	live.finish(stem, o, ok)
+	return o, ok, logPath, nil
 }
 
 // syncRepo refuses a dirty checkout (commits would sweep up stray changes) and fast-forwards it.
