@@ -64,8 +64,6 @@ entry `exact-ref-0.1.5` scored there end to end. What the setup took, for the ne
 - Re-score everything in `submissions/` when the plan hash changes.
 - Baselines on freshly resolved environments, daily, to see library-update trends (not urgent):
   https://github.com/btraven00/sc-brrr/issues/4
-- Score up the ladder (10k, 50k, 100k, 150k, …) and stop at the first OOM: the largest size an entry
-  handles within the budget is itself a result.
 - A GitHub App instead of the machine account; a check run next to the comment.
 - Serve the run's detailed `runner.log` (redacted) next to the summary log.
 - Results keyed by input content, not the size label (sc-brrr `docs/design.typ`, caveats).

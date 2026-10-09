@@ -69,7 +69,8 @@ func (c config) announce(e queued, stem, logName string) (pr int, commentID int6
 	var made struct {
 		ID int64 `json:"id"`
 	}
-	body := fmt.Sprintf("⏳ **Scoring `%s`** on the %s input. %s", stem, c.size, c.logLink(logName, "Live log"))
+	body := fmt.Sprintf("⏳ **Scoring `%s`** at %s (each size in turn, stopping at the first that doesn't score ok). %s",
+		stem, strings.Join(c.ladder(), ", "), c.logLink(logName, "Live log"))
 	if err := c.gh.api("POST", fmt.Sprintf("/repos/%s/%s/issues/%d/comments", c.gh.owner, c.gh.repo, prs[0].Number),
 		map[string]string{"body": body}, &made); err != nil {
 		log.Printf("warning: commenting on PR #%d: %v", prs[0].Number, err)
@@ -78,37 +79,49 @@ func (c config) announce(e queued, stem, logName string) (pr int, commentID int6
 	return prs[0].Number, made.ID
 }
 
-// report edits the announcement with the outcome and where to find the result or the reason.
-func (c config) report(pr int, commentID int64, stem, logName string, o Outcome) {
-	if c.gh == nil || commentID == 0 {
+// report edits the announcement with each size's outcome and where to find its result or the reason.
+func (c config) report(pr int, commentID int64, stem string, steps []step) {
+	if c.gh == nil || commentID == 0 || len(steps) == 0 {
 		return
 	}
-	icon, where := "❌", ""
 	results := strings.TrimSuffix(strings.TrimSuffix(c.resultsURL, "/"), ".git")
 	repo := strings.TrimSuffix(strings.TrimSuffix(c.repoURL, "/"), ".git")
-	switch {
-	case o.scored():
-		if o.Outcome == "ok" {
-			icon = "✅"
+	icon := map[string]string{"ok": "✅", "jobs_failed": "❌", "rejected": "⛔", "setup_failed": "⛔"}
+	var lines []string
+	for _, st := range steps {
+		where := ""
+		switch {
+		case st.o.scored():
+			where = fmt.Sprintf("[result](%s/tree/HEAD/%s)", results, st.o.Result)
+		case st == steps[0]:
+			where = fmt.Sprintf("not scored: [reason and log](%s/blob/HEAD/failed/%s.outcome.json)", repo, stem)
+		default:
+			where = "not scored"
 		}
-		where = fmt.Sprintf("Result: %s/tree/HEAD/%s", results, o.Result)
-	case o.Outcome == "rejected" || o.Outcome == "setup_failed":
-		where = fmt.Sprintf("Not scored; the reason and the end of the log: %s/blob/HEAD/failed/%s.outcome.json", repo, stem)
+		lines = append(lines, fmt.Sprintf("| %s | %s %s | %s | %s |", st.size, icon[st.o.Outcome], st.o.Outcome, where, c.logLink(st.logName, "log")))
+	}
+	last := steps[len(steps)-1].o
+	note := ""
+	if last.Outcome != "ok" {
+		note = fmt.Sprintf("\n\nStopped at %s:\n```text\n%s\n```", steps[len(steps)-1].size, strings.ReplaceAll(c.redact.Replace(last.Reason), "```", "'''"))
 	}
 	if !c.push {
-		where += " (not pushed yet)"
+		note += "\n\n(not pushed yet)"
 	}
-	body := fmt.Sprintf("%s **`%s`: %s**\n\n```text\n%s\n```\n\n%s\n\n%s", icon, stem, o.Outcome,
-		strings.ReplaceAll(c.redact.Replace(o.Reason), "```", "'''"), where, c.logLink(logName, "Log"))
+	body := fmt.Sprintf("**`%s`**\n\n| size | outcome | | |\n|---|---|---|---|\n%s%s", stem, strings.Join(lines, "\n"), note)
 	if err := c.gh.api("PATCH", fmt.Sprintf("/repos/%s/%s/issues/comments/%d", c.gh.owner, c.gh.repo, commentID),
 		map[string]string{"body": body}, nil); err != nil {
 		log.Printf("warning: updating the comment on PR #%d: %v", pr, err)
 	}
 }
 
+// logLink points at a kept log, or at the live page when logName is empty.
 func (c config) logLink(logName, label string) string {
 	if c.publicURL == "" {
-		return label + ": kept on the scoring host (no public-url set)."
+		return label + ": kept on the scoring host"
 	}
-	return fmt.Sprintf("%s: %s/logs/%s", label, strings.TrimSuffix(c.publicURL, "/"), logName)
+	if logName == "" {
+		return fmt.Sprintf("[%s](%s/)", label, strings.TrimSuffix(c.publicURL, "/"))
+	}
+	return fmt.Sprintf("[%s](%s/logs/%s)", label, strings.TrimSuffix(c.publicURL, "/"), logName)
 }

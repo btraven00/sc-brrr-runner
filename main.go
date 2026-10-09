@@ -52,6 +52,7 @@ func (o Outcome) scored() bool { return o.Outcome == "ok" || o.Outcome == "jobs_
 
 type config struct {
 	repo, results, size, state string
+	sizes                      string // the ladder, e.g. "10k,50k,100k": climbed in order, stopped at the first size that doesn't score ok
 	dataCache                  string // the host's input cache (HF cache layout), filled and mounted by runner.py
 	repoURL, resultsURL        string
 	publicURL                  string        // where -listen is reachable from outside, for the PR comment
@@ -79,7 +80,8 @@ func main() {
 	flag.StringVar(&c.resultsURL, "results-url", "https://github.com/btraven00/sc-brrr-results", "cloned into -results if missing")
 	listen := flag.String("listen", "", "serve the live page and the kept logs here (e.g. 127.0.0.1:8080)")
 	flag.StringVar(&c.publicURL, "public-url", "", "the live page's public address, linked from PR comments (e.g. https://runner.example.org)")
-	flag.StringVar(&c.size, "size", "10k", "input size to score on")
+	flag.StringVar(&c.size, "size", "10k", "input size to score on (without sizes)")
+	flag.StringVar(&c.sizes, "sizes", "", "the size ladder, e.g. 10k,50k,100k: each in order, stopping at the first that doesn't score ok")
 	flag.StringVar(&c.dataCache, "data-cache", "cache", "input cache: runner.py downloads each input once, checks its sha256, mounts it read-only")
 	flag.StringVar(&c.state, "state", filepath.Join(home, ".local/state/sc-brrr-runner"), "kept logs and the lock")
 	flag.BoolVar(&c.push, "push", false, "push both repos after each entry (without it, everything stays local)")
@@ -260,28 +262,33 @@ func baselinesIfDue(c config) error {
 	for _, id := range strings.Split(c.baselines, ",") {
 		id = strings.TrimSpace(id)
 		stem := "baselines/" + id
-		logName := time.Now().Format("20060102T150405") + "-baselines_" + id + ".log"
-		log.Printf("baseline %s (log %s)", id, filepath.Join(c.state, "logs", logName))
-		o, ok, logPath, err := c.runScore(stem, logName, "--baseline", id)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return fmt.Errorf("baseline %s: score.py gave no OUTCOME line; see %s", id, logPath)
-		}
-		log.Printf("baseline %s: %s: %s", id, o.Outcome, o.Reason)
-		if !o.scored() {
-			continue
-		}
-		if err := copyFile(logPath, filepath.Join(c.results, o.Result, "score.log")); err != nil {
-			return err
-		}
-		if err := commitResults(c, o); err != nil {
-			return err
-		}
-		if c.push {
-			if _, err := git(c.results, "push", "-q"); err != nil {
+		for _, size := range c.ladder() {
+			logName := time.Now().Format("20060102T150405") + "-baselines_" + id + "-" + size + ".log"
+			log.Printf("baseline %s %s (log %s)", id, size, filepath.Join(c.state, "logs", logName))
+			o, ok, logPath, err := c.runScore(stem+" "+size, logName, size, "--baseline", id)
+			if err != nil {
 				return err
+			}
+			if !ok {
+				return fmt.Errorf("baseline %s %s: score.py gave no OUTCOME line; see %s", id, size, logPath)
+			}
+			log.Printf("baseline %s %s: %s: %s", id, size, o.Outcome, o.Reason)
+			if o.scored() {
+				if err := copyFile(logPath, filepath.Join(c.results, o.Result, "score.log")); err != nil {
+					return err
+				}
+				if err := commitResults(c, o); err != nil {
+					return err
+				}
+				if c.push {
+					if _, err := git(c.results, "push", "-q"); err != nil {
+						return err
+					}
+				}
+			}
+			c.cleanRun(o)
+			if o.Outcome != "ok" {
+				break // the ladder stops at the first size that doesn't score ok
 			}
 		}
 	}
@@ -290,7 +297,32 @@ func baselinesIfDue(c config) error {
 
 // runScore runs score.py with args, its output to the kept log (redacted) and the live page, and
 // returns its OUTCOME.
-func (c config) runScore(stem, logName string, args ...string) (o Outcome, ok bool, logPath string, err error) {
+// ladder is the sizes to climb: sizes if set, else size alone.
+func (c config) ladder() []string {
+	if c.sizes == "" {
+		return []string{c.size}
+	}
+	var l []string
+	for _, x := range strings.Split(c.sizes, ",") {
+		if x = strings.TrimSpace(x); x != "" {
+			l = append(l, x)
+		}
+	}
+	return l
+}
+
+// cleanRun drops a run's out/ (inputs, outputs, envs' scratch) once its outcome is recorded: the result
+// (results checkout) or the failure record holds what's kept; runs/<id>/runner.log and results/ stay.
+func (c config) cleanRun(o Outcome) {
+	if o.Run == "" || strings.ContainsAny(o.Run, "/\\") {
+		return
+	}
+	if err := os.RemoveAll(filepath.Join(c.repo, "runs", o.Run, "out")); err != nil {
+		log.Printf("warning: cleaning runs/%s/out: %v", o.Run, err)
+	}
+}
+
+func (c config) runScore(stem, logName, size string, args ...string) (o Outcome, ok bool, logPath string, err error) {
 	logPath = filepath.Join(c.state, "logs", logName)
 	lf, err := os.Create(logPath)
 	if err != nil {
@@ -300,7 +332,7 @@ func (c config) runScore(stem, logName string, args ...string) (o Outcome, ok bo
 	live.start(stem, logName)
 	tail := &tailWriter{max: 80}
 	published := &redactWriter{w: lf, r: c.redact}
-	cmd := exec.Command("./score.py", append([]string{"--no-commit", "--size", c.size, "--results", c.results}, args...)...)
+	cmd := exec.Command("./score.py", append([]string{"--no-commit", "--size", size, "--results", c.results}, args...)...)
 	cmd.Dir, cmd.Env = c.repo, append(scrubbedEnv(), "SC_BRRR_DATA_CACHE="+c.dataCache)
 	cmd.Stdout = io.MultiWriter(published, os.Stdout, tail)
 	cmd.Stderr = io.MultiWriter(published, os.Stderr, tail)
@@ -363,75 +395,56 @@ func pending(repo string) ([]queued, error) {
 
 func score(c config, e queued) error {
 	stem := strings.TrimSuffix(strings.TrimPrefix(e.rel, "incoming/"), ".yaml") // <account>/<name>-<ver>
-	logName := time.Now().Format("20060102T150405") + "-" + strings.ReplaceAll(stem, "/", "_") + ".log"
-	logPath := filepath.Join(c.state, "logs", logName)
-	lf, err := os.Create(logPath)
-	if err != nil {
-		return err
-	}
-	defer lf.Close()
-	log.Printf("scoring %s (log %s)", e.rel, logPath)
-	live.start(stem, logName)
-	pr, commentID := c.announce(e, stem, logName)
-
-	tail := &tailWriter{max: 80} // raw: the OUTCOME line's log path is read back
-	published := &redactWriter{w: lf, r: c.redact}
-	cmd := exec.Command("./score.py", "--no-commit", "--size", c.size, "--results", c.results, e.rel)
-	cmd.Dir, cmd.Env = c.repo, append(scrubbedEnv(), "SC_BRRR_DATA_CACHE="+c.dataCache)
-	cmd.Stdout = io.MultiWriter(published, os.Stdout, tail)
-	cmd.Stderr = io.MultiWriter(published, os.Stderr, tail)
-	runErr := cmd.Run()
-	published.Flush()
-	o, ok := tail.outcome()
-	live.finish(stem, o, ok)
-	if !ok {
-		c.report(pr, commentID, stem, logName, Outcome{Outcome: "scorer error", Reason: "the scorer broke; the entry stays queued"})
-		return fmt.Errorf("score.py gave no OUTCOME line (%v); entry left in incoming/, see %s", runErr, logPath)
-	}
-	log.Printf("%s: %s: %s", e.rel, o.Outcome, o.Reason)
-
-	if o.scored() {
-		lf.Sync()
-		if err := copyFile(logPath, filepath.Join(c.results, o.Result, "score.log")); err != nil {
+	log.Printf("scoring %s, sizes %s", e.rel, strings.Join(c.ladder(), ", "))
+	pr, commentID := c.announce(e, stem, "")
+	var steps []step // one per size tried
+	for _, size := range c.ladder() {
+		logName := time.Now().Format("20060102T150405") + "-" + strings.ReplaceAll(stem, "/", "_") + "-" + size + ".log"
+		o, ok, logPath, err := c.runScore(stem+" "+size, logName, size, e.rel)
+		if err != nil {
 			return err
 		}
-		if err := commitResults(c, o); err != nil {
-			return err
+		if !ok {
+			c.report(pr, commentID, stem, append(steps, step{size, logName, Outcome{Outcome: "scorer error", Reason: "the scorer broke; the entry stays queued"}}))
+			return fmt.Errorf("score.py gave no OUTCOME line at %s; entry left in incoming/, see %s", size, logPath)
 		}
+		log.Printf("%s %s: %s: %s", e.rel, size, o.Outcome, o.Reason)
+		steps = append(steps, step{size, logName, o})
+		if o.scored() {
+			if err := copyFile(logPath, filepath.Join(c.results, o.Result, "score.log")); err != nil {
+				return err
+			}
+			if err := commitResults(c, o); err != nil {
+				return err
+			}
+		} else if len(steps) == 1 { // nothing scored at all: the failure record, from the run's own log if there is one
+			tail := lastLines(logPath, 80)
+			if o.Log != "" {
+				tail = lastLines(o.Log, 80)
+			}
+			if err := c.recordFailure(e, stem, o, tail); err != nil {
+				return err
+			}
+		}
+		c.cleanRun(o)
+		if o.Outcome != "ok" {
+			break // the ladder stops at the first size that doesn't score ok
+		}
+	}
+	if steps[0].o.scored() { // scored at one size at least: the entry is in the log of scored entries
 		if err := move(c.repo, e.rel, "submissions", nil); err != nil {
 			return err
 		}
-		if _, err := git(c.repo, "commit", "-q", "-m", fmt.Sprintf("scored: %s: %s (results: %s)", stem, o.Outcome, o.Result)); err != nil {
-			return err
+		var sz []string
+		for _, st := range steps {
+			sz = append(sz, st.size+" "+st.o.Outcome)
 		}
-	} else {
-		record := struct {
-			Outcome
-			Time    string   `json:"time"`
-			LogTail []string `json:"log_tail"`
-		}{o, time.Now().Format(time.RFC3339), tail.lines}
-		if o.Log != "" { // the runner's own log says more than score.py's output
-			record.LogTail = lastLines(o.Log, 80)
-		}
-		record.Log = "" // a path on the scoring host; the record is published
-		record.Reason = c.redact.Replace(record.Reason)
-		for i, l := range record.LogTail {
-			record.LogTail[i] = c.redact.Replace(l)
-		}
-		var b bytes.Buffer
-		enc := json.NewEncoder(&b)
-		enc.SetEscapeHTML(false) // "<repo>", not "\u003crepo\u003e": the record is read by people
-		enc.SetIndent("", " ")
-		enc.Encode(record)
-		if err := move(c.repo, e.rel, "failed", bytes.TrimSpace(b.Bytes())); err != nil {
-			return err
-		}
-		if _, err := git(c.repo, "commit", "-q", "-m", fmt.Sprintf("failed: %s: %s", stem, o.Outcome)); err != nil {
+		if _, err := git(c.repo, "commit", "-q", "-m", fmt.Sprintf("scored: %s: %s", stem, strings.Join(sz, ", "))); err != nil {
 			return err
 		}
 	}
 	if c.push {
-		if o.scored() {
+		if steps[0].o.scored() {
 			if _, err := git(c.results, "push", "-q"); err != nil {
 				return err
 			}
@@ -440,8 +453,38 @@ func score(c config, e queued) error {
 			return err
 		}
 	}
-	c.report(pr, commentID, stem, logName, o) // after the push, so its links resolve
+	c.report(pr, commentID, stem, steps) // after the push, so its links resolve
 	return nil
+}
+
+// step is one size of the ladder and how it went.
+type step struct {
+	size, logName string
+	o             Outcome
+}
+
+// recordFailure moves an entry that scored at no size to failed/, with the reason and the end of the log.
+func (c config) recordFailure(e queued, stem string, o Outcome, tail []string) error {
+	record := struct {
+		Outcome
+		Time    string   `json:"time"`
+		LogTail []string `json:"log_tail"`
+	}{o, time.Now().Format(time.RFC3339), tail}
+	record.Log = "" // a path on the scoring host; the record is published
+	record.Reason = c.redact.Replace(record.Reason)
+	for i, l := range record.LogTail {
+		record.LogTail[i] = c.redact.Replace(l)
+	}
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false) // "<repo>", not "\u003crepo\u003e": the record is read by people
+	enc.SetIndent("", " ")
+	enc.Encode(record)
+	if err := move(c.repo, e.rel, "failed", bytes.TrimSpace(b.Bytes())); err != nil {
+		return err
+	}
+	_, err := git(c.repo, "commit", "-q", "-m", fmt.Sprintf("failed: %s: %s", stem, o.Outcome))
+	return err
 }
 
 // commitResults commits the new result, rebuilds the scoreboard and commits that.

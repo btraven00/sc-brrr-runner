@@ -47,7 +47,8 @@ another file) under its own name; flags on the command line win. `github-token` 
 |---|---|---|
 | `repo` | `../sc-brrr` | challenge checkout; cloned from `repo-url` if missing |
 | `results` | `../sc-brrr-results` | results checkout; cloned from `results-url` if missing |
-| `size` | `10k` | input size to score on |
+| `size` | `10k` | input size to score on, without `sizes` |
+| `sizes` | none | the size ladder, e.g. `10k,50k,100k`: each in order, for entries and baselines; it stops at the first size that doesn't score ok (failed jobs are recorded, then the climb stops) |
 | `push` | off | push both repos after each entry; without it everything stays local |
 | `comment` | off | comment on the entry's PR as the token's owner: on only with a bot's token |
 | `watch` | `0` | poll at this interval; `0` drains once and exits |
@@ -76,6 +77,8 @@ commits → pulls lookup on the commit that added the file) and comments with a 
 log; when it ends, it edits that comment with the outcome and a link to the result (results repo)
 or to the failure record (`failed/…outcome.json`). No token, no PR found, or an API error: a warning
 in the runner's log, never a stop.
+
+**Disk.** Once a run's outcome is recorded (its result committed, or its failure record written), the runner deletes `runs/<id>/out` in the challenge checkout: the inputs, outputs and scratch of the run. `runs/<id>/runner.log` and `runs/<id>/results/` stay, and so does everything published.
 
 **Logs are kept.** Every entry's log stays in `<state>/logs/<time>-<account>_<name>-<ver>.log`, and a
 scored entry's log is also committed with its result (`score.log`). ponytail: no rotation; at about

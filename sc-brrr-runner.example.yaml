@@ -8,6 +8,7 @@ github-token: "github_pat_..."
 repo: ../sc-brrr
 results: ../sc-brrr-results
 size: 10k
+sizes: 10k,50k,100k   # the ladder: each in order, stopping at the first that doesn't score ok
 push: true
 comment: false   # on once the token is a bot's (comments appear as the token's owner)
 git-name: omnibot-runner   # the runner's commits: by the bot, not a person
