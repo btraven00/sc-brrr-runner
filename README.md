@@ -54,6 +54,7 @@ another file) under its own name; flags on the command line win. `github-token` 
 | `listen` | off | serve the live page and the kept logs here |
 | `public-url` | none | the live page's public address, linked from PR comments |
 | `state` | `~/.local/state/sc-brrr-runner` | kept logs and the lock (one runner per host) |
+| `data-cache` | `cache` | the inputs (Hugging Face files, HF cache layout): `runner.py` downloads each once, keeps it while its sha256 matches the plan's, and mounts it read-only into the jobs, which run offline |
 | `github-token` | `$GH_TOKEN` | config file only; see below |
 
 Both checkouts must be clean: the runner commits, and won't sweep up stray changes. It

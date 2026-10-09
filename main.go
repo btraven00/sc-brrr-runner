@@ -52,6 +52,7 @@ func (o Outcome) scored() bool { return o.Outcome == "ok" || o.Outcome == "jobs_
 
 type config struct {
 	repo, results, size, state string
+	dataCache                  string // the host's input cache (HF cache layout), filled and mounted by runner.py
 	repoURL, resultsURL        string
 	publicURL                  string // where -listen is reachable from outside, for the PR comment
 	push, comment              bool
@@ -74,6 +75,7 @@ func main() {
 	listen := flag.String("listen", "", "serve the live page and the kept logs here (e.g. 127.0.0.1:8080)")
 	flag.StringVar(&c.publicURL, "public-url", "", "the live page's public address, linked from PR comments (e.g. https://runner.example.org)")
 	flag.StringVar(&c.size, "size", "10k", "input size to score on")
+	flag.StringVar(&c.dataCache, "data-cache", "cache", "input cache: runner.py downloads each input once, checks its sha256, mounts it read-only")
 	flag.StringVar(&c.state, "state", filepath.Join(home, ".local/state/sc-brrr-runner"), "kept logs and the lock")
 	flag.BoolVar(&c.push, "push", false, "push both repos after each entry (without it, everything stays local)")
 	flag.BoolVar(&c.comment, "comment", false, "comment on the entry's PR (live-log link, then the outcome), as the token's owner")
@@ -90,12 +92,12 @@ func main() {
 			log.Fatal("-comment needs github-token (config) or $GH_TOKEN, and a github.com -repo-url")
 		}
 	}
-	for _, p := range []*string{&c.repo, &c.results, &c.state} {
+	for _, p := range []*string{&c.repo, &c.results, &c.state, &c.dataCache} {
 		*p, _ = filepath.Abs(*p)
 	}
 	// what gets published (served and committed logs, failure records, PR comments) names no host
 	// paths; most specific first, as the replacer tries its pairs in order
-	c.redact = strings.NewReplacer(c.repo, "<repo>", c.results, "<results>", c.state, "<state>", home, "~")
+	c.redact = strings.NewReplacer(c.repo, "<repo>", c.results, "<results>", c.state, "<state>", c.dataCache, "<data-cache>", home, "~")
 	if err := os.MkdirAll(filepath.Join(c.state, "logs"), 0o755); err != nil {
 		log.Fatal(err)
 	}
@@ -291,7 +293,7 @@ func score(c config, e queued) error {
 	tail := &tailWriter{max: 80} // raw: the OUTCOME line's log path is read back
 	published := &redactWriter{w: lf, r: c.redact}
 	cmd := exec.Command("./score.py", "--no-commit", "--size", c.size, "--results", c.results, e.rel)
-	cmd.Dir, cmd.Env = c.repo, scrubbedEnv()
+	cmd.Dir, cmd.Env = c.repo, append(scrubbedEnv(), "SC_BRRR_DATA_CACHE="+c.dataCache)
 	cmd.Stdout = io.MultiWriter(published, os.Stdout, tail)
 	cmd.Stderr = io.MultiWriter(published, os.Stderr, tail)
 	runErr := cmd.Run()
