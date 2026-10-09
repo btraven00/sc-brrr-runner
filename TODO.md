@@ -36,11 +36,26 @@ scoring machine's git credentials (`gh auth setup-git`), commits its git identit
 
 ## 3. Running it for real on the public machine
 
-- [ ] A user for the runner, rootless podman with CDI for the GPU, the conda cache warm.
+Running on roland (x86-nvidia: L4, EPYC 7763, Ubuntu 24.04) since 2026-10-09, host id `c931f405`; first
+entry `exact-ref-0.1.5` scored there end to end. What the setup took, for the next machine:
+
+- `/etc/subuid` and `/etc/subgid` ranges for the user (root; without them images don't unpack).
+- podman 5 from nix (`~/.nix-profile/bin`), `~/.config/containers/policy.json` (default accept).
+- GPU: `nvidia-ctk` from nix ships no `nvidia-cdi-hook`; a wrapper `~/.local/bin/nvidia-cdi-hook`
+  (`exec <nix>/nvidia-ctk hook "$@"`), the spec generated with `--nvidia-cdi-hook-path` into
+  `~/.config/cdi`, and `cdi_spec_dirs` in `~/.config/containers/containers.conf`. Redo both after a
+  nix upgrade of the toolkit (the wrapper names a store path).
+- pixi matching the lock file (0.71.2, in `~/.pixi/bin`, first on PATH): an older pixi rewrites
+  `pixi.lock`, the checkout turns dirty and the runner refuses to run.
+- uv (`~/.local/bin`), the base image built there (`podman build --build-arg OB=…@4e3e526…`),
+  the runner cross-compiled (`CGO_ENABLED=0 GOOS=linux`), config copied over ssh, `chmod 600`.
+- Started with `setsid nohup`; PATH = `~/.pixi/bin:~/.nix-profile/bin:~/.local/bin:$PATH`.
+
+
+- [x] Rootless podman with CDI for the GPU, the conda cache warm (roland, as `ben`; a dedicated user later).
 - [ ] systemd unit: `-push -watch 5m -listen 127.0.0.1:8080`, `Restart=on-failure`.
 - [ ] Reverse proxy with TLS in front of the live page; `public-url` set to it.
-- [ ] Check the host id on that machine (it differs from the laptop's `50f1ae8f`), and that the
-      scoreboard's host filter shows both.
+- [x] Host id `c931f405`, next to the laptop's `50f1ae8f` on the scoreboard.
 
 ## Later (README roadmap)
 
