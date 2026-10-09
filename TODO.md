@@ -47,6 +47,8 @@ scoring machine's git credentials (`gh auth setup-git`), commits its git identit
 - Contributors run the runner locally (`try`), with the dataset fetched and verified by hash.
 - GPU smoke runs on labelled PRs, pulled by the runner, with a commit status on the PR.
 - Re-score everything in `submissions/` when the plan hash changes.
+- Score up the ladder (10k, 50k, 100k, 150k, …) and stop at the first OOM: the largest size an entry
+  handles within the budget is itself a result.
 - A GitHub App instead of the machine account; a check run next to the comment.
 - Serve the run's detailed `runner.log` (redacted) next to the summary log.
 - Results keyed by input content, not the size label (sc-brrr `docs/infrastructure.typ`, caveats).
